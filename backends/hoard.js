@@ -115,15 +115,14 @@ var whisper_file_check_queue= [];
 var processing_whisper_queue= false;
 
 function whisper_queue_item_processed( cb, err, filename ) {
-  cb( err, filename);
-  known_whisper_files[ filename ] = true;
+  if( ! err ) known_whisper_files[ filename ] = true;
   processing_whisper_queue= false;
   if( whisper_file_check_queue.length > 0 ) process.nextTick( process_whisper_file_queue );
+  cb( err, filename);
 }
 
-
 function process_whisper_file_queue() {
-    if( whisper_file_check_queue.length > 0 ) {
+    if( whisper_file_check_queue.length > 0 && !processing_whisper_queue) {
        processing_whisper_queue= true;
        var filenameCb= whisper_file_check_queue.shift();
        var filename= filenameCb[0];
@@ -132,7 +131,7 @@ function process_whisper_file_queue() {
        
        // If the whisper file was added since this entry was added to the queue, then just call back now.
        if( known_whisper_files[ filename ]) {
-          whisper_queue_item_processed( cb, err, filename);
+          whisper_queue_item_processed( cb, null, filename);
        } else {
           fs.exists( filename, function (exists) {
             if( exists ) whisper_queue_item_processed( cb, null, filename);
@@ -151,11 +150,11 @@ function process_whisper_file_queue() {
                         }
                         else {
                             console.log( "Creating '"+ measure+ "' using schema : '" + storage_schema.name +"' and aggregation: '"+aggregation.name+"'");
+                            hoard.create( filename, storage_schema.retentions, aggregation.xFilesFactor, aggregation.aggregationMethod, function(err) {
+                                if (err) console.log( err ) ;
+                                whisper_queue_item_processed( cb, err, filename)
+                            });
                         }
-                        hoard.create( filename, storage_schema.retentions, aggregation.xFilesFactor, aggregation.aggregationMethod, function(err) {
-                            if (err) console.log( err ) ;
-                            whisper_queue_item_processed( cb, err, filename)
-                        });
                     }
                 });
             }
@@ -192,6 +191,7 @@ function ensure_whisper_file( measure, cb) {
 
 function updateStats( stats, ts ) {
   var statsRemaining= stats.length;
+  var originalStatsCount= statsRemaining;
   var startTs= new Date().getTime();
   for(var i=0;i < stats.length; i++) {
     (function( stat ) {
@@ -206,7 +206,7 @@ function updateStats( stats, ts ) {
                     
                     statsRemaining--;
                     if( statsRemaining == 0 ) {
-                        console.log('All Hoard files updated, in ' + (new Date().getTime() - startTs) +"ms");
+                        console.log('All Hoard files (' + originalStatsCount + ') updated, in ' + (new Date().getTime() - startTs) +"ms");
                     }
             });
           }
