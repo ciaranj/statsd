@@ -12,7 +12,7 @@
  *   graphitePort: Port to contact graphite server at.
  */
 
-var hoard = require('hoard'), 
+var ceres = require('../../ceres'), 
    fs = require('fs'),
    mkdirp= require('mkdirp'),
    net = require('net'),
@@ -25,6 +25,7 @@ var graphiteHost;
 var graphitePort;
 var schemas;
 var aggregations;
+var tree;
 
 var graphiteStats = {};
 
@@ -111,40 +112,25 @@ var flush_stats = function graphite_flush(ts, metrics) {
 };
 
 var known_whisper_files= {};
-function process_whisper_file_queue(filename, cb, measure) {
-   if( known_whisper_files[ measure ] && known_whisper_files[ measure ].created) {
-      cb(null, filename);
+function process_whisper_file_queue(measure, cb) {
+  
+   if( known_whisper_files[ measure ] && known_whisper_files[ measure ].node) {
+      cb(null, known_whisper_files[ measure ].node);
    } else {
-      fs.exists( filename, function (exists) {
-        if( exists ) {
-            known_whisper_files[ measure ].created= true;
-            cb( null, filename);
-        }
-        else {
-            mkdirp( path.dirname(filename),0777, function(err) {
-                if( err ) { 
-                    console.log("Bad news, couldn't create folder", err ); 
-                    cb(err);
-                }
-                else {
-                    var aggregation= get_aggregation_for_measure( measure );
-                    var storage_schema= get_storage_schema_for_measure( measure );
-                    if( storage_schema == null || aggregation == null ) {
-                        var err= new Error( "Problem finding Storage Schema / Aggregation info for: "+ measure +"; "+ JSON.stringify(storage_schema) +","+ JSON.stringify(aggregation));
-                        cb(err);
-                    }
-                    else {
-                        console.log( "Creating '"+ measure+ "' using schema : '" + storage_schema.name +"' and aggregation: '"+aggregation.name+"'");
-                        hoard.create( filename, storage_schema.retentions, aggregation.xFilesFactor, aggregation.aggregationMethod, function(err) {
-                            if (err) console.log( err ) ;
-                            known_whisper_files[ measure ].created= true;
-                            cb(err, filename);
-                        });
-                    }
-                }
-            });
-        }
-    });
+     tree.getNode( measure, function(node) {
+       if( node ) {
+         known_whisper_files[ measure ].node= node;
+         cb( null, node)
+       } else {
+         tree.createNode( measure, {timeStep: 60, aggregationMethod: 'avg'}, function(err, node) {
+           if( err ) cb(err);
+           else {
+             known_whisper_files[ measure ].node= node;
+             cb( null, node)
+           }
+         })
+       }
+     });
   }
 }
 
@@ -161,12 +147,6 @@ function get_aggregation_for_measure( measure ) {
     }
     return null;
 }
-
-function ensure_whisper_file( measure, cb) {
-    var filename= "wsp_data" + path.sep + measure.replace(/\./g, path.sep);
-    filename += ".wsp";
-    process_whisper_file_queue( filename, cb, measure );
-} 
 
 function updateStats( stats, ts ) {
   var statsRemaining= stats.length;
@@ -188,15 +168,15 @@ var backend_status = function graphite_status(writeCb) {
   }
 };
 
-function parse_retentions( retentions_str) {
-    var retentions= [];
-    var archives= retentions_str.split(",");
-    for( var i=0;i< archives.length;i++ ){
-        var archive= archives[i].split(":");
-        retentions[retentions.length]= [parseInt(archive[0]), parseInt(archive[1])];
-    }
-    return retentions;
-}
+//function parse_retentions( retentions_str) {
+//    var retentions= [];
+//    var archives= retentions_str.split(",");
+//    for( var i=0;i< archives.length;i++ ){
+//        var archive= archives[i].split(":");
+//        retentions[retentions.length]= [parseInt(archive[0]), parseInt(archive[1])];
+//    }
+//    return retentions;
+//}
 
 var isFlushingStats= false;
 function flushStats() {
@@ -223,30 +203,24 @@ function flushStats() {
             var flush_whisper_file= function() {
                 if( statsTocheck.length > 0 ) {
                     var nextMetric= statsTocheck.pop();
-                     ensure_whisper_file( nextMetric, function( err, filename ) {
+                     process_whisper_file_queue( nextMetric, function( err, node ) {
                               if( err ) {
                                 console.log( err )
                                 process.nextTick( flush_whisper_file );
                               }
                               else {
-                                hoard.updateMany( filename, known_whisper_files[nextMetric].values, function(err) {
-                                    if( err ) console.log( ts +":" + filename,  err );
-                                    else {
-                                        known_whisper_files[nextMetric].values= [];
-                                    }
-                                    process.nextTick( flush_whisper_file );
+                                node.write( known_whisper_files[nextMetric].values, function(err) {
+                                  if( err ) console.log( nextMetric,  err );
+                                  else {
+                                      known_whisper_files[nextMetric].values= [];
+                                  }
+                                  process.nextTick( flush_whisper_file );
                                 });
-                              /* hoard.update( filename, known_whisper_files[nextMetric].values[0][1], known_whisper_files[nextMetric].values[0][0], function(err) {
-                                    if( err ) console.log( ts +":" + filename,  err );
-                                    else {
-                                        known_whisper_files[nextMetric].values= [];
-                                    }
-                                    process.nextTick( flush_whisper_file );
-                                });*/
                               }
                           });
                 } else {
-                    console.log( "Flushed all metrics ("+metricsToFlushCount+") in " + (new Date().getTime() - now ) +"ms [Average Length: " + totalQueueSize + "]");
+                    updateStats( [['stats.statsd.ceres.flushTime', (new Date().getTime() - now)]], Math.round(new Date().getTime() / 1000)  );
+                    console.log( new Date() + ": Flushed all metrics ("+metricsToFlushCount+") in " + (new Date().getTime() - now ) +"ms [Average Length: " + totalQueueSize + "]");
                     isFlushingStats= false;
                 }
             }
@@ -266,24 +240,41 @@ exports.init = function graphite_init(startup_time, config, events) {
   graphiteStats.last_flush = startup_time;
   graphiteStats.last_exception = startup_time;
 
-  if( config.hoard && config.hoard.schemas ) {
-    schemas= config.hoard.schemas;
-  } 
-  else {
-    schemas= [{name: "default", pattern: /^stats.*/, retentions: "10:2160,60:10080,600:105192"}];
-  }
-  if( config.hoard && config.hoard.aggregations ) {
-    aggregations= config.hoard.aggregations;
-  }
-  else {
-    aggregations= [{name: "default", pattern: /.*/, xFilesFactor: 0.3, aggregationMethod: "average"}];
-  }
+  // This is rubbish, needs to protect against the inevitable race here.
+  ceres.CeresTree.getTree(config.ceres.filePath, function(err, t ) {
+    if( err || !t ) { 
+      ceres.CeresTree.create(config.ceres.filePath, {meh: false}, function(err, t) {
+         if( err ) {
+           console.log( "There was an error : ", err );
+           //urk handle it :(
+         }
+         else {
+           tree= t;
+         }
+      });
+    } else {
+      tree= t;
+    }
+  });
+
+//  if( config.hoard && config.hoard.schemas ) {
+//    schemas= config.hoard.schemas;
+//  } 
+//  else {
+//    schemas= [{name: "default", pattern: /^stats.*/, retentions: "10:2160,60:10080,600:105192"}];
+//  }
+//  if( config.hoard && config.hoard.aggregations ) {
+//    aggregations= config.hoard.aggregations;
+//  }
+//  else {
+//    aggregations= [{name: "default", pattern: /.*/, xFilesFactor: 0.3, aggregationMethod: "average"}];
+//  }
   
   // Convert the given retentions string format to the internal hoard-compatible format
-  for(var i=0;i< schemas.length;i++) {
-    var schema= schemas[i];
-    schema.retentions= parse_retentions( schema.retentions );
-  }
+//  for(var i=0;i< schemas.length;i++) {
+//    var schema= schemas[i];
+//    schema.retentions= parse_retentions( schema.retentions );
+//  }
   flushInterval = config.flushInterval;
 
   events.on('flush', flush_stats);
@@ -292,6 +283,6 @@ exports.init = function graphite_init(startup_time, config, events) {
         if (err) throw err;
         console.log('Hoard file created!');
     });*/
-  setInterval( flushStats, 10000 );
+  setInterval( flushStats, 60000 );
   return true;
 };
