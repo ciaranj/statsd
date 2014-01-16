@@ -73,8 +73,8 @@ var flush_stats = function graphite_flush(ts, metrics) {
 
   var stats=[];
   for (key in counters) {
-    stats.push(['stats.'        + key, counter_rates[key]]);
-    stats.push(['stats_counts.' + key, counters[key]]);
+    stats.push(['stats.counters.' + key + ".rate", counter_rates[key]]);
+    stats.push(['stats.counters.' + key + ".count", counters[key]]);
 
     numStats += 1;
   }
