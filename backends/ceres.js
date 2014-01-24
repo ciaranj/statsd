@@ -13,11 +13,7 @@
  */
 
 var ceres = require('../../ceres'), 
-   fs = require('fs'),
-   mkdirp= require('mkdirp'),
-   net = require('net'),
-   path = require('path'),
-   util = require('util');
+   net = require('net');
 
 var debug;
 var flushInterval;
@@ -37,7 +33,7 @@ var post_stats = function graphite_post_stats(statString) {
       var graphite = net.createConnection(graphitePort, graphiteHost);
       graphite.addListener('error', function(connectionException){
         if (debug) {
-          util.log(connectionException);
+          l.log(connectionException);
         }
       });
       graphite.on('connect', function() {
@@ -50,7 +46,7 @@ var post_stats = function graphite_post_stats(statString) {
       });
     } catch(e){
       if (debug) {
-        util.log(e);
+        l.log(e);
       }
       graphiteStats.last_exception = Math.round(new Date().getTime() / 1000);
     }
@@ -232,8 +228,9 @@ function flushStats() {
     }
 }
 
-exports.init = function graphite_init(startup_time, config, events) {
+exports.init = function graphite_init(startup_time, config, events, logger) {
   debug = config.debug;
+  l = logger;
   graphiteHost = config.graphiteHost;
   graphitePort = config.graphitePort;
 
