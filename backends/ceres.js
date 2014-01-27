@@ -16,7 +16,6 @@ var ceres = require('../../ceres'),
    net = require('net');
 
 var debug;
-var flushInterval;
 var graphiteHost;
 var graphitePort;
 var schemas;
@@ -24,34 +23,6 @@ var aggregations;
 var tree;
 
 var graphiteStats = {};
-
-var post_stats = function graphite_post_stats(statString) {
-  var last_flush = graphiteStats.last_flush || 0;
-  var last_exception = graphiteStats.last_exception || 0;
-  if (graphiteHost) {
-    try {
-      var graphite = net.createConnection(graphitePort, graphiteHost);
-      graphite.addListener('error', function(connectionException){
-        if (debug) {
-          l.log(connectionException);
-        }
-      });
-      graphite.on('connect', function() {
-        var ts = Math.round(new Date().getTime() / 1000);
-        statString += 'stats.statsd.graphiteStats.last_exception ' + last_exception + ' ' + ts + "\n";
-        statString += 'stats.statsd.graphiteStats.last_flush ' + last_flush + ' ' + ts + "\n";
-        this.write(statString);
-        this.end();
-        graphiteStats.last_flush = Math.round(new Date().getTime() / 1000);
-      });
-    } catch(e){
-      if (debug) {
-        l.log(e);
-      }
-      graphiteStats.last_exception = Math.round(new Date().getTime() / 1000);
-    }
-  }
-}
 
 var flush_stats = function graphite_flush(ts, metrics) {
   var starttime = Date.now();
@@ -101,10 +72,10 @@ var flush_stats = function graphite_flush(ts, metrics) {
     stats.push(['stats.statsd.' + key, statsd_metrics[key]]);
   }
 
-  stats.push(['statsd.numStats',  numStats]);
-  stats.push(['stats.statsd.graphiteStats.calculationtime', (Date.now() - starttime)]);
+  stats.push(['stats.statsd.numStats',  numStats]);
+  stats.push(['stats.statsd.ceres.calculationtime', (Date.now() - starttime)]);
 
-  updateStats( stats, ts  );
+  updateStats( stats, ts, true );
 };
 
 var known_whisper_files= {};
@@ -130,21 +101,7 @@ function process_whisper_file_queue(measure, cb) {
   }
 }
 
-function get_storage_schema_for_measure( measure ) {
-    for(var i=0;i< schemas.length;i++ ){
-        if( schemas[i].pattern.test( measure ) ) return schemas[i];
-    }
-    return null;
-}
-
-function get_aggregation_for_measure( measure ) {
-    for(var i=0;i< aggregations.length;i++ ){
-        if( aggregations[i].pattern.test( measure ) ) return aggregations[i];
-    }
-    return null;
-}
-
-function updateStats( stats, ts ) {
+function updateStats( stats, ts, flush ) {
   var statsRemaining= stats.length;
   var originalStatsCount= statsRemaining;
   var startTs= new Date().getTime();
@@ -156,6 +113,7 @@ function updateStats( stats, ts ) {
     }
     wspr.values.push( [ts, stats[stat][1]] );
   }
+  if( flush === true ) _flushStats();
 }
 
 var backend_status = function graphite_status(writeCb) {
@@ -164,23 +122,16 @@ var backend_status = function graphite_status(writeCb) {
   }
 };
 
-//function parse_retentions( retentions_str) {
-//    var retentions= [];
-//    var archives= retentions_str.split(",");
-//    for( var i=0;i< archives.length;i++ ){
-//        var archive= archives[i].split(":");
-//        retentions[retentions.length]= [parseInt(archive[0]), parseInt(archive[1])];
-//    }
-//    return retentions;
-//}
-
 var isFlushingStats= false;
-function flushStats() {
+function _flushStats() {
     if( isFlushingStats ) {
-        console.log("ignoring flush request");
+      if( debug ) { l.log("ignoring overlapping flush request"); }
         return;
     }
     else {
+        if( debug ) {
+          l.log( "Flushing existing metrics" );
+        }
         isFlushingStats= true;
         var statsTocheck= [];
         var now = new Date().getTime();
@@ -189,8 +140,17 @@ function flushStats() {
         var totalQueueSize= 0;
         for(var key in known_whisper_files) {
             if( known_whisper_files[key].values.length >0 ) {
-                statsTocheck.push( key );
-                totalQueueSize+= known_whisper_files[key].values.length;
+              // We need to take a 'copy' of the data because, as the node.write maybe async
+              // the known_whisper_files[key].values array could be updated by the outer statsd
+              // code via #flush_stats before we've finished writing out the existing data values.
+                var valuesToFlush= known_whisper_files[key].values.slice();
+                statsTocheck.push( {"key":key, "values":valuesToFlush} );
+                totalQueueSize+= valuesToFlush.length;
+
+                // Set back to empty so any new data that comes in, is distinguishable from the sent.
+                // if we have any problems with the write process, we'll just pop them on the front of the list
+                // on-error.
+                known_whisper_files[key].values= [];
             }
         }
         var metricsToFlushCount= statsTocheck.length
@@ -199,16 +159,20 @@ function flushStats() {
             var flush_whisper_file= function() {
                 if( statsTocheck.length > 0 ) {
                     var nextMetric= statsTocheck.pop();
-                     process_whisper_file_queue( nextMetric, function( err, node ) {
+                     process_whisper_file_queue( nextMetric.key, function( err, node ) {
                               if( err ) {
-                                console.log( err )
+                                if( debug ) { l.log("!!! DROPPED STAT", "ERROR"); l.log( err, "ERROR" ); }
                                 process.nextTick( flush_whisper_file );
                               }
                               else {
-                                node.write( known_whisper_files[nextMetric].values, function(err) {
-                                  if( err ) console.log( nextMetric,  err );
-                                  else {
-                                      known_whisper_files[nextMetric].values= [];
+                                node.write( nextMetric.values, function(err) {
+                                  if( err ) {
+                                    if( debug ) { 
+                                      l.log("!!! DROPPED STAT", "ERROR");
+                                      l.log( nextMetric, "ERROR" );
+                                      l.log( err, "ERROR" ); 
+                                    }
+                                    // We will try the stats again (fingers-crossed this doesn't happen indefinitely!)
                                   }
                                   process.nextTick( flush_whisper_file );
                                 });
@@ -216,11 +180,13 @@ function flushStats() {
                           });
                 } else {
                     updateStats( [['stats.statsd.ceres.flushTime', (new Date().getTime() - now)]], Math.round(new Date().getTime() / 1000)  );
-                    console.log( new Date() + ": Flushed all metrics ("+metricsToFlushCount+") in " + (new Date().getTime() - now ) +"ms [Average Length: " + totalQueueSize + "]");
+                    if( debug ) {
+                      l.log( "Flushed all metrics ("+metricsToFlushCount+") in " + (new Date().getTime() - now ) +"ms [Average Length: " + totalQueueSize + "]");
+                    }
                     isFlushingStats= false;
                 }
             }
-            flush_whisper_file();
+            process.nextTick( flush_whisper_file );
         }
         else {
             isFlushingStats= false;
@@ -237,49 +203,28 @@ exports.init = function graphite_init(startup_time, config, events, logger) {
   graphiteStats.last_flush = startup_time;
   graphiteStats.last_exception = startup_time;
 
+  function begin(t, msg) {
+    if( debug ) { l.log( msg, "INFO" ); }
+    tree= t;
+    events.on('flush', flush_stats);
+  }
+
   // This is rubbish, needs to protect against the inevitable race here.
   ceres.CeresTree.getTree(config.ceres.filePath, function(err, t ) {
     if( err || !t ) { 
       ceres.CeresTree.create(config.ceres.filePath, {meh: false}, function(err, t) {
          if( err ) {
-           console.log( "There was an error : ", err );
+           if( debug ) { l.log( err, "ERROR" ); }
            //urk handle it :(
          }
          else {
-           tree= t;
+           begin( t, "Created ceres tree successfully" );
          }
       });
     } else {
-      tree= t;
+      begin( t, "Loaded existing ceres tree successfully" );
     }
   });
 
-//  if( config.hoard && config.hoard.schemas ) {
-//    schemas= config.hoard.schemas;
-//  } 
-//  else {
-//    schemas= [{name: "default", pattern: /^stats.*/, retentions: "10:2160,60:10080,600:105192"}];
-//  }
-//  if( config.hoard && config.hoard.aggregations ) {
-//    aggregations= config.hoard.aggregations;
-//  }
-//  else {
-//    aggregations= [{name: "default", pattern: /.*/, xFilesFactor: 0.3, aggregationMethod: "average"}];
-//  }
-  
-  // Convert the given retentions string format to the internal hoard-compatible format
-//  for(var i=0;i< schemas.length;i++) {
-//    var schema= schemas[i];
-//    schema.retentions= parse_retentions( schema.retentions );
-//  }
-  flushInterval = config.flushInterval;
-
-  events.on('flush', flush_stats);
-//  events.on('status', backend_status);
-/*    hoard.create('users.hoard', [[1, 60], [10, 600]], 0.5, function(err) {
-        if (err) throw err;
-        console.log('Hoard file created!');
-    });*/
-  setInterval( flushStats, 60000 );
   return true;
 };
