@@ -22,9 +22,16 @@ var schemas;
 var aggregations;
 var tree;
 
+var echoFileName= null;
+var echoFs= null;
+
 var graphiteStats = {};
 
 var flush_stats = function graphite_flush(ts, metrics) {
+  if( echoFs ) {
+    var o= {"ts": ts, "metrics": metrics};
+    echoFs.write( JSON.stringify(o) +",\n");
+  }
   var starttime = Date.now();
   var statString = '';
   var numStats = 0;
@@ -125,12 +132,12 @@ var backend_status = function graphite_status(writeCb) {
 var isFlushingStats= false;
 function _flushStats() {
     if( isFlushingStats ) {
-      if( debug ) { l.log("ignoring overlapping flush request"); }
+      if( debug ) { l.log("ignoring overlapping flush request", "ERROR"); }
         return;
     }
     else {
         if( debug ) {
-          l.log( "Flushing existing metrics" );
+          l.log( "Flushing existing metrics", "ERROR" );
         }
         isFlushingStats= true;
         var statsTocheck= [];
@@ -197,6 +204,8 @@ function _flushStats() {
 exports.init = function graphite_init(startup_time, config, events, logger) {
   debug = config.debug;
   l = logger;
+  echoFileName= config.echoFile;
+
   graphiteHost = config.graphiteHost;
   graphitePort = config.graphitePort;
 
@@ -205,6 +214,9 @@ exports.init = function graphite_init(startup_time, config, events, logger) {
 
   function begin(t, msg) {
     if( debug ) { l.log( msg, "INFO" ); }
+    if( echoFileName ) {
+      echoFs= require('fs').createWriteStream( echoFileName, {flags: 'w', ecnoding: 'utf8', mode: 0666} );
+    }
     tree= t;
     events.on('flush', flush_stats);
   }
