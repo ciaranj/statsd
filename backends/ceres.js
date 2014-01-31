@@ -27,9 +27,11 @@ var echoFs= null;
 
 var graphiteStats = {};
 
+var clampedTs= null;
+var flushInterval;
 var flush_stats = function graphite_flush(ts, metrics) {
   if( echoFs ) {
-    var o= {"ts": ts, "metrics": metrics};
+    var o= {"ts": ts, "clampedTs": clampedTs, "metrics": metrics};
     echoFs.write( JSON.stringify(o) +",\n");
   }
   var starttime = Date.now();
@@ -82,7 +84,24 @@ var flush_stats = function graphite_flush(ts, metrics) {
   stats.push(['stats.statsd.numStats',  numStats]);
   stats.push(['stats.statsd.ceres.calculationtime', (Date.now() - starttime)]);
 
-  updateStats( stats, ts, true );
+  // Figure out clamped stuff.
+  if( clampedTs == null ) {
+    // Choose nearest interval edge.
+    var difference= ( ts % flushInterval );
+    if( difference < flushInterval /2 )  {
+      clampedTs = ts - ( ts % flushInterval )
+    }
+    else {
+      clampedTs = ts +  (flushInterval - ( ts % flushInterval ))
+    }
+  }
+  else {
+    clampedTs += flushInterval;
+  }
+  if( debug ) {
+    if( clampedTs != ts) l.log( "Clamped: " + new Date(clampedTs *1000)+ " UnClamped: "+ new Date(ts*1000), "DEBUG" );
+  }  
+  updateStats( stats, clampedTs, true );
 };
 
 var known_whisper_files= {};
@@ -137,7 +156,7 @@ function _flushStats() {
     }
     else {
         if( debug ) {
-          l.log( "Flushing existing metrics", "ERROR" );
+          l.log( "Flushing existing metrics", "DEBUG" );
         }
         isFlushingStats= true;
         var statsTocheck= [];
@@ -205,7 +224,7 @@ exports.init = function graphite_init(startup_time, config, events, logger) {
   debug = config.debug;
   l = logger;
   echoFileName= config.echoFile;
-
+  flushInterval = config.flushInterval/1000;
   graphiteHost = config.graphiteHost;
   graphitePort = config.graphitePort;
 
