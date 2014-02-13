@@ -12,8 +12,10 @@
  *   graphitePort: Port to contact graphite server at.
  */
 
-var ceres = require('../../ceres'), 
-   net = require('net');
+var   ceres = require('../../ceres')
+    , net = require('net')
+    , Rollup= require('../../ceres/lib/maintenance/rollup')
+    , schedule = require('node-schedule');
 
 var debug;
 var graphiteHost;
@@ -25,6 +27,8 @@ var tree;
 var echoFileName= null;
 var echoFs= null;
 
+var l;
+var ceres_rollup;
 var graphiteStats = {};
 
 var clampedTs= null;
@@ -115,9 +119,26 @@ function process_whisper_file_queue(measure, cb) {
          known_whisper_files[ measure ].node= node;
          cb( null, node)
        } else {
-         tree.createNode( measure, {timeStep: 60, aggregationMethod: 'avg'}, function(err, node) {
+         var metaData= {
+           timeStep: 60
+         }
+         for( var s in schemas ) {
+           if( schemas[s].pattern.test(measure) ) {
+             metaData.retentions= schemas[s].retentions;
+             break;
+           }
+         }
+         for( var a in aggregations ) {
+           if( aggregations[a].pattern.test(measure)) {
+             metaData.xFilesFactor= aggregations[a].xFilesFactor;
+             metaData.aggregationMethod= aggregations[a].aggregationMethod;
+             break;
+           }
+         }
+         tree.createNode( measure, metaData, function(err, node) {
            if( err ) cb(err);
            else {
+             if( debug ) l.log("Created "+measure+" with metadata : " + JSON.stringify(metaData), "DEBUG");
              known_whisper_files[ measure ].node= node;
              cb( null, node)
            }
@@ -219,6 +240,15 @@ function _flushStats() {
         }
     }
 }
+function parse_retentions( retentions_str ) {
+    var retentions= [];
+    var archives= retentions_str.split(",");
+    for( var i=0;i< archives.length;i++ ){
+        var archive= archives[i].split(":");
+        retentions[retentions.length]= [parseInt(archive[0]), parseInt(archive[1])];
+    }
+    return retentions;
+}
 
 exports.init = function graphite_init(startup_time, config, events, logger) {
   debug = config.debug;
@@ -230,6 +260,27 @@ exports.init = function graphite_init(startup_time, config, events, logger) {
 
   graphiteStats.last_flush = startup_time;
   graphiteStats.last_exception = startup_time;
+  aggregations= config.ceres.aggregations;
+  if(typeof(aggregations) == 'undefined' ) {
+    l.log("Creating a default aggregation configuration to use for new nodes.", "WARN");
+    aggregations= [{name: "default", pattern: /.*/, xFilesFactor: 0.5, aggregationMethod: "average"}];
+  }
+  if( debug ) l.log( "Aggregation Rules: " + JSON.stringify( aggregations ), "DEBUG")
+
+  // Only bother doing rollup maintenance if retentions have been configured.
+  schemas= config.ceres.schemas;
+  if( schemas != null && schemas[0].retentions ) {
+    // Convert the given retentions string format to the internal hoard-compatible format
+    for(var i=0;i< schemas.length;i++) {
+      var schema= schemas[i];
+      schema.retentions= parse_retentions( schema.retentions );
+    }
+    if( debug ) l.log( "Schema rules: " + JSON.stringify( schemas ), "DEBUG")
+    ceres_rollup= new Rollup();
+  }
+  else {
+    l.log( "No schemas have been specified, rollup maintenance will be inactive.", "WARN")
+  }
 
   function begin(t, msg) {
     if( debug ) { l.log( msg, "INFO" ); }
@@ -237,13 +288,22 @@ exports.init = function graphite_init(startup_time, config, events, logger) {
       echoFs= require('fs').createWriteStream( echoFileName, {flags: 'w', ecnoding: 'utf8', mode: 0666} );
     }
     tree= t;
+    if( schemas != null && schemas[0].retentions  ) {
+      ceres_rollup.init(tree, config, l);
+    }
     events.on('flush', flush_stats);
+    if( schemas && schemas[0].retentions ) {
+      // Schedule maintenance to occur at 5 minutes past midnight.
+      schedule.scheduleJob( {hour: 0, minute: 5,}, function(){
+        ceres_rollup.process();
+      });
+    }
   }
 
   // This is rubbish, needs to protect against the inevitable race here.
   ceres.CeresTree.getTree(config.ceres.filePath, function(err, t ) {
     if( err || !t ) { 
-      ceres.CeresTree.create(config.ceres.filePath, {meh: false}, function(err, t) {
+      ceres.CeresTree.create(config.ceres.filePath, {}, function(err, t) {
          if( err ) {
            if( debug ) { l.log( err, "ERROR" ); }
            //urk handle it :(

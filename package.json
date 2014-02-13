@@ -14,9 +14,7 @@
   },
   "version": "0.7.1",
   "dependencies": {
-    "hoard": "git://github.com/ciaranj/hoard.git#add_aggregation_type_support",
-    "mkdirp" : "=0.3.4"
-
+    "node-schedule": "0.1.13"
   },
   "devDependencies": {
     "nodeunit": "0.7.x",
