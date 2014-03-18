@@ -12,9 +12,9 @@
  *   graphitePort: Port to contact graphite server at.
  */
 
-var   ceres = require('../../ceres')
+var   ceres = require('ceres')
     , net = require('net')
-    , Rollup= require('../../ceres/lib/maintenance/rollup')
+    , Rollup= require('ceres/lib/maintenance/rollup')
     , schedule = require('node-schedule');
 
 var debug;
