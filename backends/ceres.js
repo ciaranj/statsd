@@ -34,10 +34,6 @@ var graphiteStats = {};
 var clampedTs= null;
 var flushInterval;
 var flush_stats = function graphite_flush(ts, metrics) {
-  if( echoFs ) {
-    var o= {"ts": ts, "clampedTs": clampedTs, "metrics": metrics};
-    echoFs.write( JSON.stringify(o) +",\n");
-  }
   var starttime = Date.now();
   var statString = '';
   var numStats = 0;
@@ -50,6 +46,7 @@ var flush_stats = function graphite_flush(ts, metrics) {
   var counter_rates = metrics.counter_rates;
   var timer_data = metrics.timer_data;
   var statsd_metrics = metrics.statsd_metrics;
+  var clampedTsAdjusted= false;
 
   var stats=[];
   for (key in counters) {
@@ -88,8 +85,8 @@ var flush_stats = function graphite_flush(ts, metrics) {
   stats.push(['stats.statsd.numStats',  numStats]);
   stats.push(['stats.statsd.ceres.calculationtime', (Date.now() - starttime)]);
 
-  // Figure out clamped stuff.
-  if( clampedTs == null ) {
+  function calculateClampedTs() {
+	var clampedTs= 0;
     // Choose nearest interval edge.
     var difference= ( ts % flushInterval );
     if( difference < flushInterval /2 )  {
@@ -98,13 +95,31 @@ var flush_stats = function graphite_flush(ts, metrics) {
     else {
       clampedTs = ts +  (flushInterval - ( ts % flushInterval ))
     }
+	return clampedTs;
+  }
+
+  // Figure out clamped stuff.
+  if( clampedTs == null ) {
+	clampedTs= calculateClampedTs();
   }
   else {
     clampedTs += flushInterval;
+	// Due to potential timeslips, we allow adjusting-forward of the clampedTs.  This will lead to gaps in the data, but the alternative
+	// (not clamping, and relying on the timestamps we've been given) leads to repeated writes of the same timestamp, but different data, the end
+	// result of which is *LOST* (overwritten) data!
+	var adjustedClampedTs= calculateClampedTs();
+	if( adjustedClampedTs - clampedTs > flushInterval ) {
+		clampedTs= adjustedClampedTs;
+		clampedTsAdjusted= true;
+	}
   }
   if( debug ) {
     if( clampedTs != ts) l.log( "Clamped: " + new Date(clampedTs *1000)+ " UnClamped: "+ new Date(ts*1000), "DEBUG" );
-  }  
+  }
+  if( echoFs ) {
+    var o= {"ts": ts, "clampedTs": clampedTs, "now": new Date().getTime()/1000, "adjusted": clampedTsAdjusted};
+    echoFs.write( JSON.stringify(o) +",\n");
+  }
   updateStats( stats, clampedTs, true );
 };
 
@@ -160,7 +175,13 @@ function updateStats( stats, ts, flush ) {
     }
     wspr.values.push( [ts, stats[stat][1]] );
   }
-  if( flush === true ) _flushStats();
+  if( flush === true ) {
+    // Perform the flush asynchronously so we don't 
+    // miss out on setInterval calls to the main timer loop ( graphite_flush() ) 
+    // due to the flush taking longer than the interval 
+    // See: http://javascript.info/tutorial/settimeout-setinterval for a nice description of this.
+    setImmediate( _flushStats );
+  }
 }
 
 var backend_status = function graphite_status(writeCb) {
